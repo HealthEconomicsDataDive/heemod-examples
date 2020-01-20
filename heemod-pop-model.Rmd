@@ -1,0 +1,321 @@
+---
+title: "heemod TB population Markov model"
+author: "Nathan Green (Imperial College London)"
+date: "17/01/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Introduction
+
+In this document we go through an example of TB progression in a cohort using the package `heemod`.
+See here for more about `heemod`: https://cran.r-project.org/web/packages/heemod/vignettes/d_non_homogeneous.html
+
+## Setup
+
+First we attach the packages we'll need and load in the data.
+
+```{r message=FALSE}
+library(heemod)
+library(purrr)
+library(dplyr)
+
+# age-dependent probability of death, TB and QoL weighting
+pdeath_QoL <-
+  read.csv("data/pdeath_QoL.csv")
+head(pdeath_QoL)
+
+# probabilistic realisations of starting state probabilities
+load(file = "data/init_states.RData")
+head(init_states)
+```
+
+Next we define the model parameters.
+We assume that everyone start in the model at age 35.
+We hardcode the transition probabilities for TB progression,
+as well as the treatment cost and discounting rate.
+
+We also use `heemod::look_up()` to take the associated probability of death and Quality of Life (QoL) measure for a given age.
+
+```{r}
+param <- define_parameters(
+  age_init = 34,                   # starting age
+  age = age_init + markov_cycle,   # increment age annually
+  
+  # transition probabilities
+  pReact_comp = 0.0006779,         # TB after completed LTBI treatment       
+  pReact_incomp = 0.0015301,       # TB after LTBI treatment dropout
+  pReact = 0.0019369,              # TB after no treatment
+  
+  TB_cost = 4925.76,               # cost of TB treatment (£)
+  d = 0.035,                       # annual discount factor
+  
+  # match prob death to age
+  pdeath = look_up(data = pdeath_QoL,
+                   value = "pDeath",
+                   age = age),
+  pdeathTB = look_up(data = pdeath_QoL,
+                     value = "pDeath_TB",
+                     age = age),
+  
+  # match QoL weight to age
+  QoL = look_up(data = pdeath_QoL,
+                value = "QOL_weight",
+                age = age)
+)
+```
+
+
+Lets create the named transition matrix.
+The `C` notation fills in the missing entry with the complement of the other state probabilities.
+
+```{r}
+mat_trans <- define_transition(
+  state_names = c(
+    "noLTBI",
+    "completeTx",
+    "incompleteTx",
+    "noTx",
+    "activeTB",
+    "dead"
+  ),
+  
+  # from-to probability matrix
+  # C represent complements
+  C, 0, 0, 0, 0,             pdeath,
+  0, C, 0, 0, pReact_comp,   pdeath,
+  0, 0, C, 0, pReact_incomp, pdeath,
+  0, 0, 0, C, pReact,        pdeath,
+  C, 0, 0, 0, 0,             pdeathTB,
+  0, 0, 0, 0, 0,             1
+)
+```
+
+
+Define cost and utility values associated with each state.
+For this simple example the QALY loss and incurred cost are attributable to the `activeTB` state.
+
+```{r}
+
+noLTBI <- define_state(
+  cost = 0,
+  utility = discount(QoL, d, first = TRUE)
+)
+
+completeTx <- define_state(
+  cost = 0,
+  utility = discount(QoL, d, first = TRUE)
+)
+
+incompleteTx <- define_state(
+  cost = 0,
+  utility = discount(QoL, d, first = TRUE)
+)
+
+noTx <- define_state(
+  cost = 0,
+  utility = discount(QoL, d, first = TRUE)
+)
+
+activeTB <- define_state(
+  cost = discount(TB_cost, d, first = TRUE),
+  utility = discount(QoL - 0.15, d, first = TRUE)
+)
+
+dead <- define_state(
+  cost = 0,
+  utility = 0
+)
+```
+
+Combine all of the model elements to form a 'strategy' consisting of a transition matrix and states with properties attached.
+
+```{r}
+strat_6mo <- define_strategy(
+  transition = mat_trans,
+  noLTBI = noLTBI,
+  completeTx = completeTx,
+  incompleteTx = incompleteTx,
+  noTx = noTx,
+  activeTB = activeTB,
+  dead = dead
+)
+```
+
+For an initial population sensitivity analysis, define starting state populations from the data.
+
+```{r}
+init_states <- select(.data = init_states,
+                      noLTBI,
+                      completeTx,
+                      incompleteTx,
+                      noTx)
+
+init_states <- data.frame(init_states, activeTB = 0, dead = 0)
+```
+
+
+Now we are ready to run a single simulation.
+
+```{r}
+res_mod <-
+  run_model(
+    init = 1000 * init_states[1, ], # initial population sizes
+    method = "end",
+    strat_6mo,
+    parameters = param,
+    cycles = 66,                    # number of time steps
+    cost = cost,
+    effect = utility
+  )
+```
+
+Note that transitions happen at the beginning of each year (equivalent to transition happening at
+the end ignoring the first year) with `method = "beginning"`.
+Since with this method the first year is actually the second, costs should be discounted from the start with the argument `first = TRUE` in `discount()`.
+
+
+Next run multiple simulations using the sample of starting state probabilities.
+
+```{r message=FALSE, warning=FALSE}
+res_mod <- list()
+
+for (i in 1:nrow(init_states)) {
+  
+  res_mod[[i]] <-
+    run_model(
+      # init = c(674.0588764, # hard-code values
+      #          168.0253748,
+      #          42.42724895,
+      #          115.4884998,
+      #          0,0),
+      init = 1000 * init_states[i, ],
+      method = "end",
+      strat_6mo,
+      parameters = param,
+      cycles = 66,
+      cost = cost,
+      effect = utility
+    )
+}
+```
+
+
+### Results
+
+Extract the cost and utility values using functions from the 'purrr' package. This is an excellent package for manipulating lists.
+
+```{r}
+res_mod[[1]]
+
+c1 <- map_df(res_mod, "run_model")$cost
+h1 <- map_df(res_mod, "run_model")$utility
+
+get_counts(res_mod[[1]]) %>% head()
+get_values(res_mod[[1]]) %>% head()
+
+summary(res_mod[[4]])
+
+# plots
+hist(c1, breaks = 30)
+hist(h1, breaks = 30)
+
+plot(res_mod[[4]])
+
+# state-edge graph
+plot(mat_trans, arr.type = "simple")
+```
+
+
+### Cost-utility PSA
+
+Define a second itnervention.
+Lets assume that a 3 month active TB treatment cost half as much but has three times the health impact.
+
+```{r}
+activeTB_3mo <- define_state(
+  cost = discount(TB_cost/2, d, first = TRUE),
+  utility = discount(QoL - 0.15*3, d, first = TRUE)
+)
+```
+
+This new state is then used as part of a new 'strategy'.
+
+```{r}
+strat_3mo <- define_strategy(
+  transition = mat_trans,
+  noLTBI = noLTBI,
+  completeTx = completeTx,
+  incompleteTx = incompleteTx,
+  noTx = noTx,
+  activeTB = activeTB_3mo,
+  dead = dead
+)
+```
+
+We repeat running `run_model()` but with two strategies this time (and a single starting population).
+
+```{r}
+mod_psa <-
+  run_model(
+    init = 100 * init_states[1, ],
+    method = "end",
+    strat_6mo = strat_6mo,
+    strat_3mo = strat_3mo,
+    parameters = param,
+    cycles = 66,
+    cost = cost,
+    effect = utility
+  )
+```
+
+`heemod` has in-built functions to perform PSA.
+We specify the distributions in the `define_psa()` definition.
+
+```{r}
+rsp <- define_psa(
+  TB_cost ~ gamma(mean = 4925.76, sd = sqrt(4925.76)),
+  pReact_comp ~ binomial(prob = 0.14, size = 10),
+  pReact_incomp ~ binomial(prob = 0.15301, size = 10),
+  pReact ~ binomial(prob = 0.09369, size = 10)
+)
+```
+
+Finally we run the PSA.
+
+```{r}
+pm <- run_psa(
+  model = mod_psa,
+  psa = rsp,
+  N = 200
+)
+```
+
+```{r}
+summary(pm)
+```
+
+```{r}
+plot(pm, type = "ce")
+plot(pm, type = "ac", max_wtp = 10000, log_scale = FALSE)
+```
+
+We can alternatively use `ggplot` to make the figures.
+
+```{r}
+library(ggplot2)
+
+plot(pm, type = "ce") +
+  xlab("QALY gain") +
+  ylab("Additional cost") +
+  scale_color_brewer(
+    name = "Strategy",
+    palette = "Set1"
+  ) +
+  theme_minimal()
+```
+
