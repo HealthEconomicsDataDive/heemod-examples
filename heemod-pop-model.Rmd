@@ -3,6 +3,8 @@ title: "heemod TB population Markov model"
 author: "Nathan Green (Imperial College London)"
 date: "17/01/2020"
 output: pdf_document
+editor_options: 
+  chunk_output_type: console
 ---
 
 ```{r setup, include=FALSE}
@@ -184,7 +186,7 @@ Next run multiple simulations using the sample of starting state probabilities.
 ```{r message=FALSE, warning=FALSE}
 res_mod <- list()
 
-for (i in 1:nrow(init_states)) {
+for (i in 1:4){#nrow(init_states)) {
   
   res_mod[[i]] <-
     run_model(
@@ -217,6 +219,19 @@ h1 <- map_df(res_mod, "run_model")$utility
 
 get_counts(res_mod[[1]]) %>% head()
 get_values(res_mod[[1]]) %>% head()
+
+xx <- map(res_mod, get_counts)
+names(xx) <- as.character(1:4)
+out_counts <- do.call(rbind, xx)
+out_counts$id <- rownames(out_counts)
+
+xx <- map(res_mod, get_values)
+names(xx) <- as.character(1:4)
+out_values <- do.call(rbind, xx)
+out_values$id <- rownames(out_values)
+
+write.csv(out_counts, "out_counts.csv")
+write.csv(out_values, "out_values.csv")
 
 summary(res_mod[[4]])
 
